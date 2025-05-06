@@ -119,6 +119,11 @@
             <version>1.19.1</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-docker-compose</artifactId>
+        </dependency>
+
     </dependencies>
 
     <build>
