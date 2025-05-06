@@ -1,0 +1,13 @@
+spring:
+  application:
+    name: test_task
+  datasource:
+    url: jdbc:postgresql://localhost:5432/testdb
+    username: postgres
+    password: 1111
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+  liquibase:
+      change-log: classpath:db/changelog/db.changelog.xml
