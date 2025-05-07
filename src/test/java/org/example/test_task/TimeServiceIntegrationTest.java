@@ -11,6 +11,8 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.DockerClientFactory;
+import com.github.dockerjava.api.DockerClient;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -24,7 +26,6 @@ public class TimeServiceIntegrationTest {
     @Autowired
     private TimeService timeService;
 
-    // Запускаем Postgres-контейнер
     @Container
     private static final PostgreSQLContainer<?> postgres =
             new PostgreSQLContainer<>("postgres:15")
@@ -40,43 +41,40 @@ public class TimeServiceIntegrationTest {
     }
 
     @Test
-    void testDatabaseConnectionLossAndRecovery() throws Exception {
-        // Подождём 3 секунды, чтобы записались первые таймштампы
+    void testDatabasePauseAndResume() throws Exception {
+        // Ждём 3 секунды, чтобы сервис успел что-то записать
         Thread.sleep(3000);
 
-        List<TimeEntry> initialEntries = timeService.getAll();
-        System.out.println("До остановки БД: " + initialEntries.size());
-        assertThat(initialEntries).isNotEmpty();
+        List<TimeEntry> beforePause = timeService.getAll();
+        System.out.println("До приостановки БД: " + beforePause.size());
+        assertThat(beforePause).isNotEmpty();
 
-        // Останавливаем БД (эмуляция падения)
-        postgres.stop();
-        System.out.println("Postgres остановлен");
+        // Приостанавливаем контейнер (имитируем перегруженную БД)
+        DockerClient dockerClient = DockerClientFactory.instance().client();
+        dockerClient.pauseContainerCmd(postgres.getContainerId()).exec();
+        System.out.println("Postgres приостановлен");
 
-        // Ждём несколько секунд, чтобы сервис попытался писать и собрал буфер
+        // Ждём 5 секунд — время накопления буфера
         Thread.sleep(5000);
 
-        // Перезапускаем БД
-        postgres.start();
-        System.out.println("Postgres снова запущен");
+        // Возобновляем контейнер
+        dockerClient.unpauseContainerCmd(postgres.getContainerId()).exec();
+        System.out.println("Postgres возобновлён");
 
-        // Даем время, чтобы буфер дозаписался после восстановления
+        // Даем сервису время дозаписать из буфера
         Thread.sleep(10000);
 
-        // Проверяем итоговые записи
-        List<TimeEntry> allEntries = timeService.getAll();
-        System.out.println("После восстановления: " + allEntries.size());
-        assertThat(allEntries.size()).isGreaterThan(initialEntries.size());
+        List<TimeEntry> afterResume = timeService.getAll();
+        System.out.println("После возобновления: " + afterResume.size());
+        assertThat(afterResume.size()).isGreaterThan(beforePause.size());
 
-        // Проверяем, что все записи строго по возрастанию времени (хронологически)
-        LocalDateTime prevTime = null;
-        for (TimeEntry entry : allEntries) {
-            if (prevTime != null) {
-                Assertions.assertTrue(
-                        !entry.getTime().isBefore(prevTime),
-                        "Порядок нарушен: " + entry.getTime() + " идёт после " + prevTime
-                );
+        // Проверка корректности порядка
+        LocalDateTime prev = null;
+        for (TimeEntry entry : afterResume) {
+            if (prev != null) {
+                Assertions.assertFalse(entry.getTime().isBefore(prev), "Нарушен порядок: " + entry.getTime() + " перед " + prev);
             }
-            prevTime = entry.getTime();
+            prev = entry.getTime();
         }
     }
 }
