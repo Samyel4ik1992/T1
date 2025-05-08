@@ -1,13 +1,27 @@
 spring:
   application:
     name: test_task
+
   datasource:
     url: jdbc:postgresql://localhost:5432/testdb
     username: postgres
     password: 1111
+    hikari:
+      connection-timeout: 2000        # ⏱ быстрое определение сбоя (2 секунды)
+      maximum-pool-size: 10
+      minimum-idle: 1
+      validation-timeout: 1000        # быстрая проверка соединений
+      idle-timeout: 30000             # очищаем простаивающие
+      max-lifetime: 60000             # уменьшаем срок жизни соединений (минуту)
+
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: create                # 💥 пересоздаёт таблицы при старте (в dev)
     show-sql: true
+    open-in-view: false              # желательно выключить для прод
+
   liquibase:
-      change-log: classpath:db/changelog/db.changelog.xml
+    change-log: classpath:db/changelog/db.changelog.xml
+  docker:
+    compose:
+      enabled: false

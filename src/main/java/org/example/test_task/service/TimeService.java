@@ -27,18 +27,19 @@ public class TimeService {
     private static final String BUFFER_FILE = "buffer.json";
 
     private final TimeEntryRepository repository;
+    private final TimeSaver timeSaver;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // Очереди: для новых записей и для буфера при недоступности БД
-    private final BlockingQueue<TimeEntry> mainQueue = new LinkedBlockingQueue<>();
+    // Очереди
+    private final BlockingQueue<TimeEntry> mainQueue = new LinkedBlockingQueue<>(1000); // расширена
     private final BlockingQueue<TimeEntry> bufferQueue = new LinkedBlockingQueue<>();
 
     @Autowired
-    public TimeService(TimeEntryRepository repository) {
+    public TimeService(TimeEntryRepository repository, TimeSaver timeSaver) {
         this.repository = repository;
+        this.timeSaver = timeSaver;
     }
 
-    // Загрузка буфера из файла при старте
     @PostConstruct
     public void loadBuffer() {
         File file = new File(BUFFER_FILE);
@@ -48,66 +49,84 @@ public class TimeService {
                         .constructCollectionType(List.class, TimeEntry.class);
                 List<TimeEntry> loaded = objectMapper.readValue(file, listType);
                 bufferQueue.addAll(loaded);
-                log.info("Загружено {} записей из буфера", loaded.size());
+                log.info("🔄 Загружено {} записей из буфера", loaded.size());
             } catch (IOException e) {
-                log.error("Ошибка при загрузке буфера из файла", e);
+                log.error("❌ Ошибка при загрузке буфера из файла", e);
             }
         }
     }
 
-    // Сохранение буфера при завершении работы приложения
     @PreDestroy
     public void saveBufferToFile() {
         if (!bufferQueue.isEmpty()) {
             try {
                 objectMapper.writeValue(new File(BUFFER_FILE), bufferQueue);
-                log.info("Сохранили буфер из {} записей в файл", bufferQueue.size());
+                log.info("💾 Сохранили буфер из {} записей в файл", bufferQueue.size());
             } catch (IOException e) {
-                log.error("Ошибка при сохранении буфера в файл", e);
+                log.error("❌ Ошибка при сохранении буфера в файл", e);
             }
         }
     }
 
-    // Каждую секунду создаём новую запись и кладём в очередь
     @Scheduled(fixedRate = 1000)
     public void writeTime() {
         LocalDateTime now = LocalDateTime.now();
         TimeEntry entry = new TimeEntry(now);
-        mainQueue.offer(entry);
-        log.info("Поставили в очередь новую запись: {}", now);
+        try {
+            mainQueue.put(entry); // блокирующее добавление
+            log.info("📥 Поставили в очередь новую запись: {}", now);
+            log.debug("mainQueue.size = {}, bufferQueue.size = {}", mainQueue.size(), bufferQueue.size());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("⚠️ Поток был прерван при добавлении в очередь");
+        }
     }
 
-    // Воркер: обрабатывает очередь и сохраняет записи в БД
     @PostConstruct
     public void startWorker() {
         Thread worker = new Thread(() -> {
             while (true) {
                 TimeEntry entry = null;
                 try {
-                    // 1️⃣ Сначала пробуем достать из буфера (приоритет)
                     entry = bufferQueue.poll();
-                    if (entry == null) {
-                        // 2️⃣ Если буфер пуст, ждём новую запись из основной очереди (блокирующий вызов)
+                    if (entry != null) {
+                        log.info("🔁 Обрабатываем из буфера: {}", entry.getTime());
+                    } else {
                         entry = mainQueue.take();
+                        log.info("➡️ Обрабатываем из очереди: {}", entry.getTime());
                     }
-                    // Пытаемся сохранить запись
-                    repository.save(entry);
-                    log.info("Сохранили запись: {}", entry.getTime());
+
+                    timeSaver.save(entry);
+                    log.info("✅ Сохранили запись: {}", entry.getTime());
 
                 } catch (CannotCreateTransactionException ex) {
-                    log.warn("БД недоступна. Перекладываем запись в буфер.");
-                    bufferQueue.offer(entry);
-                    sleepSilently(5000);  // ждём 5 секунд перед следующей попыткой
+                    log.warn("🚫 БД недоступна. Перекладываем в буфер: {}", entry.getTime());
+                    requeueBuffer(entry);
+                    sleepSilently(2000); // короче — чтобы не терять темп
+
                 } catch (Exception ex) {
-                    log.error("Ошибка при сохранении", ex);
+                    log.error("❌ Ошибка при сохранении: {}. Перекладываем в буфер", entry.getTime(), ex);
+                    requeueBuffer(entry);
+                    sleepSilently(2000);
                 }
             }
         });
-        worker.setDaemon(true);  // поток завершится при остановке приложения
+
+        worker.setDaemon(true);
         worker.start();
     }
 
-    // Вспомогательный метод для сна
+    private void requeueBuffer(TimeEntry entry) {
+        if (entry != null) {
+            try {
+                bufferQueue.put(entry); // блокирующее добавление
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("⚠️ Поток прерван при добавлении в буфер");
+            }
+        }
+    }
+
     private void sleepSilently(long millis) {
         try {
             Thread.sleep(millis);
@@ -116,7 +135,6 @@ public class TimeService {
         }
     }
 
-    // Метод для получения всех записей (не изменял)
     public List<TimeEntry> getAll() {
         return repository.findAll();
     }
